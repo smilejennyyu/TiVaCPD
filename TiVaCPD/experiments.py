@@ -13,6 +13,7 @@ from load_data import *
 import matplotlib
 from performance import *
 import roerich
+import ruptures as rpt
 from cpd_methods import *
 from performance import *
 import fnmatch,os
@@ -21,7 +22,8 @@ from scipy.signal import savgol_filter
 import warnings
 from scipy.signal import peak_prominences
 from pyampd.ampd import find_peaks, find_peaks_adaptive
-
+from TIRE import DenseTIRE as TIRE
+from sklearn.preprocessing import minmax_scale
 def save_data(path, array):
     with open(path,'wb') as f:
         pkl.dump(array, f)
@@ -115,6 +117,24 @@ def main():
             y_true[0] = 0
             X_samples.append(X)
             y_true_samples.append(y_true)
+
+    if args.data_type in ['OCCUPANCY', 'occupancy']:
+        data_path = os.path.join(args.data_path)
+        n_samples = len(fnmatch.filter(os.listdir(data_path),'occupancy_X_*'))
+        X_samples = []
+        y_true_samples = []
+        for i in range(n_samples):
+            X, y_true = load_occupancy(data_path, i)
+            y_true_spike = y_true.copy()
+            for j in range(len(y_true)):
+                if y_true[j] != y_true[j-1]:
+                    y_true_spike[j] = 1
+                else:
+                    y_true_spike[j] = 0
+            y_true = y_true_spike
+            y_true[0] = 0
+            X_samples.append(X)
+            y_true_samples.append(y_true)
             
     # results path
     if not os.path.exists(os.path.join(args.out_path)):
@@ -144,9 +164,8 @@ def main():
 
     for i in range(0, len(X_samples)):
         print(i)
+        data_path = os.path.join(args.out_path, args.exp)
         if args.model_type == 'MMDATVGL_CPD':
-            
-            data_path = os.path.join(args.out_path, args.exp)
 
             X = X_samples[i]
             y_true = y_true_samples[i]
@@ -399,9 +418,7 @@ def main():
             y_pred=np.zeros(X.shape[0]+1)
             y_pred[result] = 1
 
-
             y_true = y_true_samples[i]
-
             metrics = ComputeMetrics(y_true, y_pred, args.margin, args.threshold)
             auc_scores.append(metrics.auc)
             f1_scores.append(metrics.f1) 
@@ -439,6 +456,69 @@ def main():
                 os.mkdir(data_path)
 
             save_data(os.path.join(data_path, ''.join(['ruptures_score_', str(i), '.pkl'])), y_pred)
+        elif args.model_type == 'AUTOENCODER':
+            ############ HYPERPARAMETERS ###################
+            window_size = 7
+            intermediate_dim_TD = 10
+            intermediate_dim_FD = 10
+            nfft = 30
+            num_epoch = 200
+            ############ HYPERPARAMETERS ###################
+            X = X_samples[i]
+
+            n_samples = X.shape[0]
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            dim = X.shape[1]
+            model = TIRE(dim, window_size=window_size, intermediate_dim_TD=intermediate_dim_TD, intermediate_dim_FD=intermediate_dim_FD, nfft=nfft).to(device)
+            model.fit(X, epoches=num_epoch)
+
+            dissimilarities, y_pred = model.predict(X)
+
+            if np.isnan(y_pred).any():
+                y_pred[np.isnan(y_pred)] = 0
+            else:
+                y_pred[y_pred > args.threshold] = 1
+                y_pred[y_pred <= args.threshold] = 0
+
+            y_true = y_true_samples[i]
+            metrics = ComputeMetrics(y_true, y_pred, args.margin, args.threshold)
+            auc_scores.append(metrics.auc)
+            f1_scores.append(metrics.f1) 
+            precision_scores.append(metrics.precision)
+            recall_scores.append(metrics.recall)
+            peaks = metrics.peaks
+            print("AUC:",np.round(metrics.auc,2), "F1:",np.round(metrics.f1,2), "Precision:", np.round(metrics.precision,2), "Recall:",np.round(metrics.recall,2))
+
+
+            plt.plot(minmax_scale(X))
+            plt.plot(y_true, label = 'y_true')
+            plt.legend()
+            plt.title(args.exp)
+            plt.savefig(os.path.join(data_path, ''.join(['X_', str(i), '.png'])))
+            plt.clf()
+
+            plt.plot(y_true, label = 'y_true')
+            plt.plot(y_pred, label = 'y_pred')
+            plt.legend()
+            plt.title(args.exp)
+            plt.savefig(os.path.join(data_path, ''.join(['AUTOENCODER_score_', str(i), '.png'])))
+            plt.clf()
+            print(os.path.join(data_path, ''.join(['AUTOENCODER_score_', str(i), '.png'])))
+
+            plt.plot(y_true, label = 'y_true')
+            plt.plot(peaks, label = 'peaks')
+            plt.legend()
+            plt.title(args.exp)
+            plt.savefig(os.path.join(data_path, ''.join(['AUTOENCODER_peaks_', str(i), '.png'])))
+            plt.clf()
+
+            data_path = os.path.join(args.out_path, args.exp)
+            if not os.path.exists(args.out_path): 
+                os.mkdir(args.out_path)
+            if not os.path.exists(data_path): 
+                os.mkdir(data_path)
+
+            save_data(os.path.join(data_path, ''.join(['AUTOENCODER_score_', str(i), '.pkl'])), y_pred)
 
     
 
